@@ -5613,6 +5613,7 @@ spec:
                     - Idle
                     - RebalanceOnScaleDown
                     - RebalanceOnScaleUp
+                    - RebalanceOnImbalance
                     description: "The current state of an auto-rebalancing operation. Possible values are: \n\n* `Idle` as the initial state when an auto-rebalancing is requested or as final state when it completes or fails.\n* `RebalanceOnScaleDown` if an auto-rebalance related to a scale-down operation is running.\n* `RebalanceOnScaleUp` if an auto-rebalance related to a scale-up operation is running."
                   lastTransitionTime:
                     type: string
