@@ -4543,8 +4543,8 @@ spec:
                           enum:
                           - add-brokers
                           - remove-brokers
-                          - full
-                          description: "Specifies the mode for automatically rebalancing when brokers are added or removed. Supported modes are `add-brokers` and `remove-brokers`. \n"
+                          - imbalance
+                          description: "Specifies the mode for automatically rebalancing. Supported modes are `add-brokers` (when brokers are added), `remove-brokers` (when brokers are removed), and `imbalance` (when cluster imbalance is detected). \n"
                         template:
                           type: object
                           properties:
@@ -5613,7 +5613,6 @@ spec:
                     - Idle
                     - RebalanceOnScaleDown
                     - RebalanceOnScaleUp
-                    - RebalanceOnImbalance
                     description: "The current state of an auto-rebalancing operation. Possible values are: \n\n* `Idle` as the initial state when an auto-rebalancing is requested or as final state when it completes or fails.\n* `RebalanceOnScaleDown` if an auto-rebalance related to a scale-down operation is running.\n* `RebalanceOnScaleUp` if an auto-rebalance related to a scale-up operation is running."
                   lastTransitionTime:
                     type: string
@@ -5628,8 +5627,8 @@ spec:
                           enum:
                           - add-brokers
                           - remove-brokers
-                          - full
-                          description: "Mode for which there is an auto-rebalancing operation in progress or queued, when brokers are added or removed. The possible modes are `add-brokers` and `remove-brokers`."
+                          - imbalance
+                          description: "Mode for which there is an auto-rebalancing operation in progress or queued. The possible modes are `add-brokers` (brokers added), `remove-brokers` (brokers removed), and `imbalance` (cluster imbalance detected)."
                         brokers:
                           type: array
                           items:

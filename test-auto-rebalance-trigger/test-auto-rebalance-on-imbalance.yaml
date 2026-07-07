@@ -104,7 +104,7 @@ spec:
         com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal
 
     autoRebalance:
-      - mode: full
+      - mode: imbalance
         template:
           name: test-imbalance-template
 

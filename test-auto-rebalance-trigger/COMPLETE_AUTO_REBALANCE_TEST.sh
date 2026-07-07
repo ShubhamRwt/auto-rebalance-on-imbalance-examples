@@ -116,7 +116,7 @@ echo ""
 
 log "Creating 15 topics with 3 partitions each..."
 for i in {1..15}; do
-    kubectl run kafka-topic-create-$i -n $NAMESPACE --image=quay.io/srawat/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
+    kubectl run kafka-topic-create-$i -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
         bin/kafka-topics.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 \
         --create --topic topic-$i --partitions 3 --replication-factor 2 \
         --config min.insync.replicas=1 2>&1 | grep "Created topic" || true
@@ -126,7 +126,7 @@ log "✓ 15 topics created (45 partitions total)"
 log "Producing significant data to create disk usage imbalance..."
 log "Producing heavy data to first 10 topics (will be placed mostly on broker-0)..."
 for i in {1..10}; do
-    kubectl run kafka-producer-heavy-$i -n $NAMESPACE --image=quay.io/srawat/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c "
+    kubectl run kafka-producer-heavy-$i -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c "
         for j in {1..5000}; do
             echo \"message-\$j: $(head -c 500 /dev/urandom | base64)\"
         done | bin/kafka-console-producer.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 --topic topic-$i
@@ -136,7 +136,7 @@ wait
 log "✓ Heavy data produced to topics 1-10 (~2.5GB total)"
 
 log "Forcing most partitions to broker-0 to create disk imbalance..."
-kubectl run kafka-reassign -n $NAMESPACE --image=quay.io/srawat/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c '
+kubectl run kafka-reassign -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c '
 cat > /tmp/reassign.json <<EOF
 {
   "version": 1,
@@ -167,7 +167,7 @@ log "✓ Partitions reassigned to create disk usage imbalance (most replicas on 
 sleep 10
 
 log "Verifying disk usage distribution..."
-kubectl run kafka-log-dirs -n $NAMESPACE --image=quay.io/srawat/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
+kubectl run kafka-log-dirs -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
     bin/kafka-log-dirs.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 --describe 2>/dev/null | \
     grep -E "broker|size" | head -20 || log "Disk usage check completed"
 log "✓ Disk imbalance created"
@@ -253,8 +253,8 @@ if [ "$TRIGGERED" = false ]; then
         fi
 
         # Check if KafkaRebalance was created
-        if kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-full -n $NAMESPACE &>/dev/null; then
-            REBALANCE_STATE=$(kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-full -n $NAMESPACE \
+        if kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-imbalance -n $NAMESPACE &>/dev/null; then
+            REBALANCE_STATE=$(kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-imbalance -n $NAMESPACE \
                 -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null)
             log "✓ KafkaRebalance created! State: $REBALANCE_STATE"
             TRIGGERED=true
@@ -292,14 +292,14 @@ else
     COMPLETED=false
     for i in {1..20}; do
         # Check if KafkaRebalance still exists
-        if ! kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-full -n $NAMESPACE &>/dev/null; then
+        if ! kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-imbalance -n $NAMESPACE &>/dev/null; then
             log "✓ KafkaRebalance deleted (indicates completion)"
             COMPLETED=true
             break
         fi
 
         # Check status
-        STATUS=$(kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-full -n $NAMESPACE \
+        STATUS=$(kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-imbalance -n $NAMESPACE \
             -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
 
         if [ "$STATUS" = "True" ]; then
@@ -318,7 +318,7 @@ else
     if [ "$COMPLETED" = false ]; then
         log "⚠ Rebalance did not complete in expected time"
         log "  Check KafkaRebalance status for details"
-        kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-full -n $NAMESPACE -o yaml
+        kubectl get kafkarebalance ${CLUSTER_NAME}-auto-rebalancing-imbalance -n $NAMESPACE -o yaml
         exit 1
     fi
 fi
@@ -424,7 +424,7 @@ else
 fi
 
 log "Checking data distribution after rebalance..."
-kubectl run kafka-log-dirs-after -n $NAMESPACE --image=quay.io/srawat/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
+kubectl run kafka-log-dirs-after -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
     bin/kafka-log-dirs.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 --describe 2>/dev/null | \
     grep -E "\"broker\":|\"size\":" | head -15 || log "Data distribution check completed"
 
