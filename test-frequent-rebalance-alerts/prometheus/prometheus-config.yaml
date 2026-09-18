@@ -1,0 +1,150 @@
+---
+# Prometheus ConfigMap with alerting rules for auto-rebalance on imbalance.
+#
+# Two alerts are defined:
+#
+# 1. FrequentAutoRebalanceOnImbalance
+#    Fires when more than 3 anomaly-detected rebalances are triggered within
+#    10 minutes. This indicates the cluster is not reaching a stable balanced
+#    state between rebalances — possibly due to a persistent imbalance that
+#    each rebalance only partially fixes, or a workload pattern that
+#    immediately re-creates the imbalance.
+#
+# 2. UnfixableGoalViolationsDetected
+#    Fires when unfixable or mixed goal violations are detected, which block
+#    auto-rebalance. These require manual infrastructure intervention (e.g.
+#    adding racks, increasing broker resources).
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  labels:
+    app: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - /etc/prometheus/rules/*.yaml
+
+    scrape_configs:
+      # Scrape the Strimzi Cluster Operator metrics endpoint
+      - job_name: 'strimzi-cluster-operator'
+        static_configs:
+          - targets: ['strimzi-cluster-operator:8080']
+        metrics_path: /metrics
+
+  alerting-rules.yaml: |
+    groups:
+      - name: strimzi.auto-rebalance-on-imbalance
+        interval: 30s
+        rules:
+
+          # Alert when auto-rebalance is triggered too frequently.
+          # More than 3 fixable anomaly detections in 10 minutes suggests
+          # the cluster is in a rebalancing loop — each rebalance completes
+          # but the imbalance immediately returns.
+          - alert: FrequentAutoRebalanceOnImbalance
+            expr: |
+              increase(
+                strimzi_auto_rebalance_anomalies_detected_total{
+                  type="goal_violation",
+                  fixability="fixable"
+                }[10m]
+              ) > 3
+            for: 0m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Frequent auto-rebalance on imbalance detected for cluster {{ $labels.namespace }}/{{ $labels.strimzi_io_cluster }}"
+              description: >
+                More than 3 fixable goal violation anomalies were detected in the last 10 minutes
+                for Kafka cluster {{ $labels.namespace }}/{{ $labels.strimzi_io_cluster }}.
+                This may indicate a persistent imbalance that cannot be fully resolved,
+                or a workload pattern that immediately re-creates the imbalance after each rebalance.
+                Consider reviewing the anomaly detection goals, increasing the detection interval,
+                or investigating the root cause of the recurring imbalance.
+                Current count: {{ $value }}
+
+          # Alert when unfixable goal violations block auto-rebalance.
+          # These require manual intervention at the infrastructure level.
+          - alert: UnfixableGoalViolationsDetected
+            expr: |
+              increase(
+                strimzi_auto_rebalance_anomalies_detected_total{
+                  type="goal_violation",
+                  fixability=~"unfixable|mixed"
+                }[5m]
+              ) > 0
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Unfixable goal violations blocking auto-rebalance for cluster {{ $labels.namespace }}/{{ $labels.strimzi_io_cluster }}"
+              description: >
+                Unfixable or mixed goal violations were detected for Kafka cluster
+                {{ $labels.namespace }}/{{ $labels.strimzi_io_cluster }}.
+                Auto-rebalance on imbalance is blocked until these are resolved.
+                Unfixable violations typically indicate infrastructure constraints such as
+                insufficient racks (RackAwareGoal), insufficient brokers (ReplicaCapacityGoal),
+                or insufficient disk/CPU/network resources.
+                Manual intervention is required. As a workaround, you can create a manual
+                KafkaRebalance with skipHardGoalCheck: true to address fixable goals only.
+                Fixability: {{ $labels.fixability }}
+
+---
+# Prometheus Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:latest
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.retention.time=1h"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: config
+              mountPath: /etc/prometheus/rules/alerting-rules.yaml
+              subPath: alerting-rules.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+
+---
+# Prometheus Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: web
+      port: 9090
+      targetPort: 9090

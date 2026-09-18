@@ -1,0 +1,129 @@
+# Test for auto-rebalance on imbalance with maintenance window
+# The initial window is set to 00:00-00:01 UTC (effectively outside normal working hours)
+# so that the rebalance is NOT triggered immediately.
+# The test script then patches the window to cover the current hour to verify triggering.
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: controller
+  labels:
+    strimzi.io/cluster: test-cluster
+spec:
+  replicas: 3
+  roles:
+    - controller
+  storage:
+    type: ephemeral
+    kraftMetadata: shared
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: broker
+  labels:
+    strimzi.io/cluster: test-cluster
+spec:
+  replicas: 3
+  roles:
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: ephemeral
+        sizeLimit: 5Gi
+      - id: 1
+        type: ephemeral
+        sizeLimit: 5Gi
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: test-cluster
+spec:
+  kafka:
+    version: 4.3.0
+    metadataVersion: 4.3-IV0
+
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      min.insync.replicas: 2
+
+  # Maintenance window set to 00:00-00:01 UTC — effectively outside normal hours.
+  # The test script patches this to the current UTC hour once an imbalance is confirmed.
+  maintenanceTimeWindows:
+    - "* * 0-0 * * ?"
+
+  cruiseControl:
+    brokerCapacity:
+      inboundNetwork: "10000KB/s"
+      outboundNetwork: "10000KB/s"
+
+    config:
+      # Fast anomaly detection for testing
+      anomaly.detection.interval.ms: 120000
+
+      anomaly.detection.goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal
+
+      goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.MinTopicLeadersPerBrokerGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.PotentialNwOutGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkInboundUsageDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.NetworkOutboundUsageDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.CpuUsageDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.TopicReplicaDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderReplicaDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.LeaderBytesInDistributionGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.PreferredLeaderElectionGoal
+
+      default.goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.ReplicaCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskCapacityGoal,
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.DiskUsageDistributionGoal
+
+      hard.goals: >
+        com.linkedin.kafka.cruisecontrol.analyzer.goals.RackAwareGoal
+
+    autoRebalance:
+      - mode: imbalance
+        template:
+          name: test-imbalance-template
+
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaRebalance
+metadata:
+  name: test-imbalance-template
+  annotations:
+    strimzi.io/rebalance-template: "true"
+spec:
+  goals:
+    - RackAwareGoal
+    - ReplicaCapacityGoal
+    - DiskCapacityGoal
+    - DiskUsageDistributionGoal
