@@ -99,3 +99,6 @@ cd test-metrics
 - Kubernetes cluster (e.g., minikube or kind)
 - `kubectl` configured to point at the cluster
 - Strimzi operator image built from this branch
+
+## For linux user:
+- Please use the following operator image -> quay.io/srawat/operator:auto-rebalance-amd64
