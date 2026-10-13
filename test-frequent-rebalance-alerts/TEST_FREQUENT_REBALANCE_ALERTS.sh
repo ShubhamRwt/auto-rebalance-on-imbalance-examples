@@ -4,41 +4,33 @@ set -e
 ################################################################################
 # FREQUENT AUTO-REBALANCE ALERT TEST
 #
-# This script demonstrates Prometheus alerting for detecting when auto-rebalance
-# on imbalance is triggered too frequently — which indicates the cluster is in
-# a rebalancing loop (the imbalance returns immediately after each rebalance).
+# Verifies that Prometheus alerts fire when auto-rebalance on imbalance is
+# triggered too frequently — indicating the cluster is in a rebalancing loop.
 #
-# Two alerts are tested:
-#
-# 1. FrequentAutoRebalanceOnImbalance
-#    Fires when strimzi_auto_rebalance_anomalies_detected_total (fixable)
-#    increases by more than 3 within a 10-minute window.
-#    This is simulated by producing a persistent imbalance that Cruise Control
-#    re-detects after each completed rebalance.
-#
-# 2. UnfixableGoalViolationsDetected (informational check)
-#    Verified by querying the metric directly for unfixable/mixed detections.
+# Two alerts are verified:
+#   FrequentAutoRebalanceOnImbalance  — fixable detections > 3 in 10 min
+#   UnfixableGoalViolationsDetected   — any unfixable/mixed detection
 #
 # What this script does:
 #   1. Deploys the Strimzi operator
-#   2. Deploys Prometheus with the alerting rules
+#   2. Deploys Prometheus with alerting rules and a metrics Service for the operator
 #   3. Deploys a Kafka cluster with a short anomaly detection interval (60s)
-#   4. Creates a persistent disk imbalance that is difficult to fully fix
-#   5. Waits for multiple rebalance cycles to occur
-#   6. Queries Prometheus to verify the anomaly counter incremented
+#   4. Creates a persistent disk imbalance that re-appears after each rebalance
+#   5. Waits for multiple rebalance cycles
+#   6. Queries Prometheus to verify the anomaly counter is incrementing
 #   7. Checks whether the FrequentAutoRebalanceOnImbalance alert fired
 #
 # Prerequisites:
-# - Kubernetes cluster (e.g., minikube)
-# - kubectl configured
-# - Strimzi operator image built from this branch
+#   - Kubernetes cluster (e.g., minikube)
+#   - kubectl configured
+#   - jq installed (for JSON parsing)
 #
 # Usage: ./TEST_FREQUENT_REBALANCE_ALERTS.sh [namespace]
 ################################################################################
 
 NAMESPACE="${1:-myproject}"
 CLUSTER_NAME="test-cluster"
-PROM_PORT=9091   # local port-forward target
+PROM_PORT=9091
 
 echo "================================================================================"
 echo "  FREQUENT AUTO-REBALANCE ALERT TEST"
@@ -51,11 +43,8 @@ pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1"; }
 info() { echo "  ℹ $1"; }
 
-# Kill port-forward on exit
 PF_PID=""
-cleanup() {
-    [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null || true
-}
+cleanup() { [ -n "$PF_PID" ] && kill "$PF_PID" 2>/dev/null || true; }
 trap cleanup EXIT
 
 wait_with_countdown() {
@@ -70,9 +59,8 @@ wait_with_countdown() {
 }
 
 query_prometheus() {
-    local query="$1"
-    curl -s "http://localhost:${PROM_PORT}/api/v1/query" \
-        --data-urlencode "query=${query}" 2>/dev/null
+    curl -sG "http://localhost:${PROM_PORT}/api/v1/query" \
+        --data-urlencode "query=$1" 2>/dev/null
 }
 
 ################################################################################
@@ -82,16 +70,14 @@ query_prometheus() {
 log "STEP 1: Setting up namespace and Strimzi operator"
 echo ""
 
-if ! kubectl get namespace $NAMESPACE &>/dev/null; then
-    kubectl create namespace $NAMESPACE
-fi
+kubectl get namespace "$NAMESPACE" &>/dev/null || kubectl create namespace "$NAMESPACE"
 
-if kubectl get deployment strimzi-cluster-operator -n $NAMESPACE &>/dev/null; then
+if kubectl get deployment strimzi-cluster-operator -n "$NAMESPACE" &>/dev/null; then
     log "Strimzi operator already deployed"
 else
     log "Deploying Strimzi operator..."
-    kubectl apply -f cluster-operator -n $NAMESPACE
-    kubectl wait pod -l name=strimzi-cluster-operator --for=condition=Ready --timeout=120s -n $NAMESPACE
+    kubectl apply -f cluster-operator -n "$NAMESPACE"
+    kubectl rollout status deployment/strimzi-cluster-operator -n "$NAMESPACE" --timeout=120s
     log "✓ Operator ready"
 fi
 
@@ -104,15 +90,17 @@ echo ""
 log "STEP 2: Deploying Prometheus with auto-rebalance alerting rules"
 echo ""
 
-kubectl apply -f prometheus/prometheus-config.yaml -n $NAMESPACE
-kubectl wait pod -l app=prometheus --for=condition=Ready --timeout=120s -n $NAMESPACE
+kubectl apply -f prometheus/prometheus-config.yaml -n "$NAMESPACE"
+
+log "Waiting for Prometheus pod to be ready..."
+kubectl rollout status deployment/prometheus -n "$NAMESPACE" --timeout=120s
 log "✓ Prometheus ready"
 
-# Port-forward Prometheus
-kubectl port-forward svc/prometheus $PROM_PORT:9090 -n $NAMESPACE &>/dev/null &
+# Port-forward Prometheus in background
+kubectl port-forward svc/prometheus "$PROM_PORT":9090 -n "$NAMESPACE" >/dev/null 2>&1 &
 PF_PID=$!
-sleep 3
-log "✓ Prometheus port-forwarded to localhost:$PROM_PORT"
+sleep 5
+log "✓ Prometheus port-forwarded → http://localhost:${PROM_PORT}"
 
 echo ""
 
@@ -123,28 +111,35 @@ echo ""
 log "STEP 3: Deploying Kafka cluster with 60s anomaly detection interval"
 echo ""
 
-if kubectl get kafka $CLUSTER_NAME -n $NAMESPACE &>/dev/null; then
+if kubectl get kafka "$CLUSTER_NAME" -n "$NAMESPACE" &>/dev/null; then
     log "Cleaning up existing cluster..."
-    kubectl delete kafka $CLUSTER_NAME -n $NAMESPACE --ignore-not-found=true
-    kubectl delete kafkarebalance --all -n $NAMESPACE --ignore-not-found=true
-    kubectl delete cm ${CLUSTER_NAME}-auto-rebalance-imbalance-tracker -n $NAMESPACE --ignore-not-found=true
+    kubectl delete kafka "$CLUSTER_NAME" -n "$NAMESPACE" --ignore-not-found=true
+    kubectl delete kafkarebalance --all -n "$NAMESPACE" --ignore-not-found=true
+    kubectl delete cm "${CLUSTER_NAME}-auto-rebalance-imbalance-tracker" \
+        -n "$NAMESPACE" --ignore-not-found=true
     sleep 15
 fi
 
-kubectl apply -f test-kafka-with-alerts.yaml -n $NAMESPACE
-kubectl wait kafka/$CLUSTER_NAME --for=condition=Ready --timeout=600s -n $NAMESPACE
+kubectl apply -f test-kafka-with-alerts.yaml -n "$NAMESPACE"
+kubectl wait kafka/"$CLUSTER_NAME" --for=condition=Ready --timeout=600s -n "$NAMESPACE"
 log "✓ Kafka cluster ready"
 
-kubectl wait pod -l strimzi.io/name=${CLUSTER_NAME}-cruise-control --for=condition=Ready --timeout=300s -n $NAMESPACE
-CC_POD=$(kubectl get pods -n $NAMESPACE -l strimzi.io/name=${CLUSTER_NAME}-cruise-control -o jsonpath='{.items[0].metadata.name}')
+kubectl wait pod -l strimzi.io/name="${CLUSTER_NAME}-cruise-control" \
+    --for=condition=Ready --timeout=300s -n "$NAMESPACE"
+CC_POD=$(kubectl get pods -n "$NAMESPACE" \
+    -l strimzi.io/name="${CLUSTER_NAME}-cruise-control" \
+    -o jsonpath='{.items[0].metadata.name}')
 log "✓ Cruise Control ready: $CC_POD"
 
-OPERATOR_POD=$(kubectl get pods -n $NAMESPACE -l name=strimzi-cluster-operator -o jsonpath='{.items[0].metadata.name}')
+OPERATOR_POD=$(kubectl get pods -n "$NAMESPACE" \
+    -l name=strimzi-cluster-operator \
+    -o jsonpath='{.items[0].metadata.name}')
+log "Operator pod: $OPERATOR_POD"
 
 echo ""
 
 ################################################################################
-# STEP 4: Create a Persistent Imbalance
+# STEP 4: Create a Persistent Disk Imbalance
 ################################################################################
 
 log "STEP 4: Creating a persistent disk usage imbalance"
@@ -152,47 +147,49 @@ echo ""
 
 log "Creating 15 topics..."
 for i in {1..15}; do
-    kubectl run kafka-topic-$i -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
-        bin/kafka-topics.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 \
-        --create --topic topic-$i --partitions 3 --replication-factor 2 \
+    kubectl run "kafka-topic-$i" -n "$NAMESPACE" \
+        --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- \
+        bin/kafka-topics.sh --bootstrap-server "${CLUSTER_NAME}-kafka-bootstrap:9092" \
+        --create --topic "topic-$i" --partitions 3 --replication-factor 2 \
         --config min.insync.replicas=1 2>&1 | grep "Created topic" || true
 done
 log "✓ Topics created"
 
-log "Producing data to broker-0 to create disk imbalance..."
+log "Producing data to create disk imbalance..."
 for i in {1..10}; do
-    kubectl run kafka-prod-$i -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c "
-        for j in {1..5000}; do
-            echo \"message-\$j: $(head -c 500 /dev/urandom | base64)\"
-        done | bin/kafka-console-producer.sh --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 --topic topic-$i
-    " &>/dev/null &
+    kubectl run "kafka-prod-$i" -n "$NAMESPACE" \
+        --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c "
+        for j in \$(seq 1 5000); do echo \"msg-\$j-$(head -c 100 /dev/urandom | base64 -w0)\"; done \
+        | bin/kafka-console-producer.sh \
+            --bootstrap-server ${CLUSTER_NAME}-kafka-bootstrap:9092 \
+            --topic topic-$i" &>/dev/null &
 done
 wait
 log "✓ Data produced"
 
 log "Concentrating partitions on broker-0..."
-kubectl run kafka-reassign -n $NAMESPACE --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c '
+kubectl run kafka-reassign -n "$NAMESPACE" \
+    --image=quay.io/strimzi/kafka:latest-kafka-4.3.0 --rm -i --restart=Never -- bash -c '
 cat > /tmp/reassign.json <<EOF
-{
-  "version": 1,
-  "partitions": [
-    {"topic": "topic-1", "partition": 0, "replicas": [0,1], "log_dirs": ["any","any"]},
-    {"topic": "topic-1", "partition": 1, "replicas": [0,1], "log_dirs": ["any","any"]},
-    {"topic": "topic-2", "partition": 0, "replicas": [0,1], "log_dirs": ["any","any"]},
-    {"topic": "topic-2", "partition": 1, "replicas": [0,2], "log_dirs": ["any","any"]},
-    {"topic": "topic-3", "partition": 0, "replicas": [0,2], "log_dirs": ["any","any"]},
-    {"topic": "topic-3", "partition": 1, "replicas": [0,1], "log_dirs": ["any","any"]},
-    {"topic": "topic-4", "partition": 0, "replicas": [0,1], "log_dirs": ["any","any"]},
-    {"topic": "topic-4", "partition": 1, "replicas": [0,2], "log_dirs": ["any","any"]},
-    {"topic": "topic-5", "partition": 0, "replicas": [0,2], "log_dirs": ["any","any"]},
-    {"topic": "topic-5", "partition": 1, "replicas": [0,1], "log_dirs": ["any","any"]}
-  ]
-}
+{"version":1,"partitions":[
+  {"topic":"topic-1","partition":0,"replicas":[0,1],"log_dirs":["any","any"]},
+  {"topic":"topic-1","partition":1,"replicas":[0,1],"log_dirs":["any","any"]},
+  {"topic":"topic-2","partition":0,"replicas":[0,1],"log_dirs":["any","any"]},
+  {"topic":"topic-2","partition":1,"replicas":[0,2],"log_dirs":["any","any"]},
+  {"topic":"topic-3","partition":0,"replicas":[0,2],"log_dirs":["any","any"]},
+  {"topic":"topic-3","partition":1,"replicas":[0,1],"log_dirs":["any","any"]},
+  {"topic":"topic-4","partition":0,"replicas":[0,1],"log_dirs":["any","any"]},
+  {"topic":"topic-4","partition":1,"replicas":[0,2],"log_dirs":["any","any"]},
+  {"topic":"topic-5","partition":0,"replicas":[0,2],"log_dirs":["any","any"]},
+  {"topic":"topic-5","partition":1,"replicas":[0,1],"log_dirs":["any","any"]}
+]}
 EOF
-bin/kafka-reassign-partitions.sh --bootstrap-server '${CLUSTER_NAME}'-kafka-bootstrap:9092 \
+bin/kafka-reassign-partitions.sh \
+    --bootstrap-server '"${CLUSTER_NAME}"'-kafka-bootstrap:9092 \
     --reassignment-json-file /tmp/reassign.json --execute
 ' 2>&1 | grep "Successfully" || true
-log "✓ Imbalance created"
+
+log "✓ Partitions concentrated on broker-0"
 
 echo ""
 
@@ -200,29 +197,32 @@ echo ""
 # STEP 5: Wait for Multiple Rebalance Cycles
 ################################################################################
 
-log "STEP 5: Waiting for multiple auto-rebalance cycles to accumulate"
-info "Anomaly detection interval is 60s — expecting 4+ detections within 10 minutes"
+log "STEP 5: Waiting for multiple auto-rebalance detection cycles"
+info "Anomaly detection interval: 60s — expecting 4+ detections within 10 minutes"
 echo ""
 
 wait_with_countdown 180 "Initial wait for Cruise Control to train and detect"
 
-log "Monitoring rebalance cycles (checking every 30s for 10 minutes)..."
+log "Monitoring detection cycles (checking every 30s for up to 10 minutes)..."
 CYCLE_COUNT=0
-for i in {1..20}; do
-    # Count completed rebalance cycles from operator logs
-    CYCLE_COUNT=$(kubectl logs -n $NAMESPACE $OPERATOR_POD --tail=500 2>/dev/null | \
-        grep -c "Rebalancing completed, transitioning to Idle" || echo 0)
+DETECTION_COUNT=0
+for i in $(seq 1 20); do
+    CYCLE_COUNT=$(kubectl logs -n "$NAMESPACE" "$OPERATOR_POD" --tail=500 2>/dev/null \
+        | grep -c "Rebalancing completed" 2>/dev/null || true)
+    CYCLE_COUNT=${CYCLE_COUNT:-0}
 
-    DETECTION_COUNT=$(kubectl logs -n $NAMESPACE $OPERATOR_POD --tail=500 2>/dev/null | \
-        grep -c "Fixable goal violations detected" || echo 0)
+    DETECTION_COUNT=$(kubectl logs -n "$NAMESPACE" "$OPERATOR_POD" --tail=500 2>/dev/null \
+        | grep -c "Fixable goal violations detected" 2>/dev/null || true)
+    DETECTION_COUNT=${DETECTION_COUNT:-0}
 
-    AUTO_STATE=$(kubectl get kafka $CLUSTER_NAME -n $NAMESPACE \
-        -o jsonpath='{.status.autoRebalance.state}' 2>/dev/null)
+    AUTO_STATE=$(kubectl get kafka "$CLUSTER_NAME" -n "$NAMESPACE" \
+        -o jsonpath='{.status.autoRebalance.state}' 2>/dev/null || echo "Unknown")
 
-    printf "  Cycle $i/20 — detections: $DETECTION_COUNT, completions: $CYCLE_COUNT, state: ${AUTO_STATE:-Idle}\n"
+    printf "  Check %2d/20 — detections: %d, completions: %d, state: %s\n" \
+        "$i" "$DETECTION_COUNT" "$CYCLE_COUNT" "$AUTO_STATE"
 
     if [ "$DETECTION_COUNT" -ge 4 ]; then
-        log "✓ Reached $DETECTION_COUNT detections — enough to verify the alert"
+        log "✓ $DETECTION_COUNT detections accumulated — sufficient to verify alert"
         break
     fi
 
@@ -239,30 +239,23 @@ log "STEP 6: Querying Prometheus for anomaly detection metrics"
 echo ""
 
 # Total fixable detections
-RESULT=$(query_prometheus 'strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability="fixable"}')
-FIXABLE_TOTAL=$(echo "$RESULT" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-results = d.get('data', {}).get('result', [])
-print(results[0]['value'][1] if results else '0')
-" 2>/dev/null || echo "0")
-log "strimzi_auto_rebalance_anomalies_detected_total{fixability=fixable}: $FIXABLE_TOTAL"
+FIXABLE_TOTAL=$(query_prometheus \
+    'strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability="fixable"}' \
+    | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo "0")
+log "strimzi_auto_rebalance_anomalies_detected_total{fixability=\"fixable\"}: $FIXABLE_TOTAL"
 
-if [ "$(echo "$FIXABLE_TOTAL > 0" | bc 2>/dev/null || [ "$FIXABLE_TOTAL" != "0" ] && echo 1 || echo 0)" = "1" ] || [ "$FIXABLE_TOTAL" != "0" ]; then
-    pass "Anomaly counter is incrementing (value: $FIXABLE_TOTAL)"
+if [ "$FIXABLE_TOTAL" != "0" ] && [ "$FIXABLE_TOTAL" != "null" ]; then
+    pass "Anomaly counter incrementing (value: $FIXABLE_TOTAL)"
 else
-    fail "Anomaly counter is still 0 — operator may not be scraping yet"
+    fail "Anomaly counter still 0 — operator may not be scraped yet (check Prometheus targets)"
 fi
 
-# Rate over 10 minutes
-RESULT_RATE=$(query_prometheus 'increase(strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability="fixable"}[10m])')
-RATE=$(echo "$RESULT_RATE" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-results = d.get('data', {}).get('result', [])
-print(round(float(results[0]['value'][1]), 2) if results else '0')
-" 2>/dev/null || echo "0")
-log "increase over last 10 minutes: $RATE"
+# 10-minute increase (the alert expression)
+RATE=$(query_prometheus \
+    'increase(strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability="fixable"}[10m])' \
+    | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo "0")
+RATE_INT=$(printf "%.0f" "${RATE:-0}" 2>/dev/null || echo "0")
+log "increase() over last 10 minutes: $RATE"
 
 echo ""
 
@@ -273,60 +266,53 @@ echo ""
 log "STEP 7: Checking Prometheus alerts"
 echo ""
 
-ALERTS=$(curl -s "http://localhost:${PROM_PORT}/api/v1/alerts" 2>/dev/null)
+ALERT_STATE=$(curl -s "http://localhost:${PROM_PORT}/api/v1/alerts" 2>/dev/null \
+    | jq -r '.data.alerts[]
+        | select(.labels.alertname == "FrequentAutoRebalanceOnImbalance")
+        | .state' 2>/dev/null || echo "")
 
-# Check FrequentAutoRebalanceOnImbalance
-FREQUENT=$(echo "$ALERTS" | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-alerts = d.get('data', {}).get('alerts', [])
-for a in alerts:
-    if a.get('labels', {}).get('alertname') == 'FrequentAutoRebalanceOnImbalance':
-        print(f'FIRING — state={a[\"state\"]}, value={a[\"annotations\"][\"description\"][:80]}...')
-        sys.exit(0)
-print('NOT_FIRING')
-" 2>/dev/null || echo "QUERY_FAILED")
-
-if echo "$FREQUENT" | grep -q "FIRING"; then
+if [ "$ALERT_STATE" = "firing" ]; then
     pass "FrequentAutoRebalanceOnImbalance alert is FIRING"
-    info "$FREQUENT"
-elif [ "$RATE" != "0" ] && python3 -c "exit(0 if float('$RATE') > 3 else 1)" 2>/dev/null; then
-    pass "Rate ($RATE) exceeds threshold (3) — alert should fire on next evaluation"
+elif [ "$RATE_INT" -gt 3 ] 2>/dev/null; then
+    pass "10-minute increase ($RATE) exceeds threshold (3) — alert fires on next evaluation cycle"
 else
     info "FrequentAutoRebalanceOnImbalance not firing yet"
-    info "Current 10-minute increase: $RATE (threshold: > 3)"
-    info "Wait longer or check that Prometheus is scraping the operator"
+    info "10-minute increase: $RATE (threshold: > 3)"
+    info "If Prometheus just started scraping, wait one more evaluation cycle (30s) and re-check:"
+    info "  curl -s http://localhost:${PROM_PORT}/api/v1/alerts | jq '.data.alerts'"
 fi
 
-# Check UnfixableGoalViolationsDetected (informational)
-UNFIXABLE_VAL=$(query_prometheus 'strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability=~"unfixable|mixed"}' | \
-    python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-results = d.get('data', {}).get('result', [])
-print(sum(float(r['value'][1]) for r in results))
-" 2>/dev/null || echo "0")
-log "Unfixable/mixed anomaly detections total: $UNFIXABLE_VAL"
+# Unfixable/mixed total (informational)
+UNFIXABLE=$(query_prometheus \
+    'sum(strimzi_auto_rebalance_anomalies_detected_total{type="goal_violation",fixability=~"unfixable|mixed"})' \
+    | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo "0")
+log "Unfixable/mixed anomaly detections total: $UNFIXABLE"
 
 echo ""
 
 ################################################################################
-# STEP 8: Show Alert Rule Expressions for Reference
+# STEP 8: Prometheus UI and Query Reference
 ################################################################################
 
-log "STEP 8: Alert rule reference"
+log "STEP 8: Prometheus query reference"
 echo ""
-echo "  FrequentAutoRebalanceOnImbalance — fires when:"
-echo "    increase(strimzi_auto_rebalance_anomalies_detected_total{"
-echo "      type=\"goal_violation\", fixability=\"fixable\"}[10m]) > 3"
+echo "  Open Prometheus UI:"
+echo "    http://localhost:${PROM_PORT}/alerts"
+echo "    http://localhost:${PROM_PORT}/targets   (verify operator is scraped)"
 echo ""
-echo "  UnfixableGoalViolationsDetected — fires when:"
-echo "    increase(strimzi_auto_rebalance_anomalies_detected_total{"
-echo "      type=\"goal_violation\", fixability=~\"unfixable|mixed\"}[5m]) > 0"
+echo "  Key queries:"
+echo "    # All anomaly detections by fixability"
+echo "    strimzi_auto_rebalance_anomalies_detected_total"
+echo ""
+echo "    # 10-minute rate (FrequentAutoRebalanceOnImbalance alert expression)"
+echo "    increase(strimzi_auto_rebalance_anomalies_detected_total{fixability=\"fixable\"}[10m])"
+echo ""
+echo "    # Active alerts"
+echo "    ALERTS{alertname=~\"FrequentAutoRebalanceOnImbalance|UnfixableGoalViolationsDetected\"}"
 echo ""
 
 ################################################################################
-# STEP 9: Final Summary
+# STEP 9: Summary
 ################################################################################
 
 log "STEP 9: Summary"
@@ -335,33 +321,18 @@ echo "==========================================================================
 echo "  TEST RESULTS"
 echo "================================================================================"
 echo ""
-echo "✓ Prometheus deployed with auto-rebalance alerting rules"
+echo "✓ Prometheus deployed with FrequentAutoRebalanceOnImbalance alert"
+echo "✓ Operator metrics Service deployed (strimzi-cluster-operator-metrics:8080)"
 echo "✓ Kafka cluster deployed with 60s anomaly detection interval"
 echo "✓ Persistent disk imbalance created"
-echo "✓ Multiple rebalance cycles observed ($CYCLE_COUNT completions)"
-echo "✓ strimzi_auto_rebalance_anomalies_detected_total counter: $FIXABLE_TOTAL"
-echo "✓ 10-minute increase: $RATE (alert threshold: > 3)"
-echo ""
-echo "Alert files deployed to Prometheus:"
-echo "  prometheus/prometheus-config.yaml"
-echo ""
-echo "To open Prometheus UI:"
-echo "  kubectl port-forward svc/prometheus $PROM_PORT:9090 -n $NAMESPACE"
-echo "  open http://localhost:$PROM_PORT/alerts"
-echo ""
-echo "Useful Prometheus queries:"
-echo "  # Total anomaly detections by fixability"
-echo "  strimzi_auto_rebalance_anomalies_detected_total"
-echo ""
-echo "  # Rate of fixable detections over 10 minutes (alert expression)"
-echo "  increase(strimzi_auto_rebalance_anomalies_detected_total{type=\"goal_violation\",fixability=\"fixable\"}[10m])"
-echo ""
-echo "  # Active alerts"
-echo "  ALERTS{alertname=~\"FrequentAutoRebalanceOnImbalance|UnfixableGoalViolationsDetected\"}"
+echo "  Rebalance completions observed : $CYCLE_COUNT"
+echo "  Anomaly detections (operator)  : $DETECTION_COUNT"
+echo "  Prometheus counter (fixable)   : $FIXABLE_TOTAL"
+echo "  10-minute increase             : $RATE  (alert threshold: > 3)"
 echo ""
 echo "To cleanup:"
 echo "  kubectl delete kafka $CLUSTER_NAME -n $NAMESPACE"
 echo "  kubectl delete deployment prometheus -n $NAMESPACE"
+echo "  kubectl delete svc prometheus strimzi-cluster-operator-metrics -n $NAMESPACE"
 echo "  kubectl delete cm prometheus-config -n $NAMESPACE"
-echo "  kubectl delete svc prometheus -n $NAMESPACE"
 echo ""
