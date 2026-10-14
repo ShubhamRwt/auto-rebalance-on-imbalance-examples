@@ -99,3 +99,14 @@ cd test-metrics
 - Kubernetes cluster (e.g., minikube or kind)
 - `kubectl` configured to point at the cluster
 - Strimzi operator image built from this branch
+
+## Operator Image
+
+The cluster operator deployment files in each example use a pre-built image for this feature branch.
+
+**Linux (amd64) users:**
+```bash
+podman pull quay.io/srawat/operator:auto-rebalance-amd64
+```
+
+Update the `image` field in `cluster-operator/060-Deployment-strimzi-cluster-operator.yaml` to use this image before deploying.
